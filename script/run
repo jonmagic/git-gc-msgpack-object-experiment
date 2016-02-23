@@ -1,0 +1,160 @@
+#!/usr/bin/env ruby
+
+require "fileutils"
+require "lorem"
+require "msgpack"
+require "open3"
+require "pathname"
+require "pry"
+require "rugged"
+
+class Runner
+  def initialize
+    @results_in_bytes = {
+      :parent_oid => [],
+      :oid => []
+    }
+    @obj = {}
+    @counter = nil
+  end
+
+  attr_reader :results_in_bytes
+
+  def project_root
+    Pathname(`pwd`.strip)
+  end
+
+  def tmp
+    project_root.join("tmp")
+  end
+
+  def bootstrap(key_count=1_000)
+    key_count.times do |n|
+      @counter = n
+      @obj["key_#{n}"] = Lorem::Base.new("words", rand(1..10)).output
+    end
+
+    File.open(project_root.join("fixture.msgpack"), "wb") do |file|
+      msg = MessagePack.pack(@obj)
+      file.write(msg)
+    end
+  end
+
+  def git(args)
+    Dir.chdir(tmp) do
+      stdout, status = Open3.capture2("git #{args}")
+      if status.success?
+        stdout
+      else
+        raise "git #{args} - failed :("
+      end
+    end
+  end
+
+  def object_size(oid)
+    results = git("verify-pack -v #{packfile_path}").split("\n")
+    lines = results.grep(/\A#{oid}/)
+    raise "more than one line" if lines.size > 1
+    line = lines.first
+    bytes = line.split(/\s/)[4]
+    bytes.to_f
+  rescue => error
+    binding.pry
+    raise error
+  end
+
+  def packfile_path
+    raise "More than one pack" if Dir[tmp.join(".git/objects/pack/*.pack")].size > 1
+    Dir[tmp.join(".git/objects/pack/*.pack")].first
+  end
+
+  def filename
+    "big_hash.msgpack"
+  end
+
+  def setup
+    FileUtils.mkdir_p(tmp)
+    FileUtils.cp(project_root.join("fixture.msgpack"), tmp.join(filename))
+  end
+
+  def repo
+    @repo ||= Rugged::Repository.init_at(tmp.to_s)
+  end
+
+  def make_commit
+    oid = Rugged::Blob.from_workdir(repo, filename)
+    index = repo.index
+    index.add(:path => filename, :oid => oid, :mode => 0100644)
+
+    options = {}
+    options[:tree] = index.write_tree(repo)
+    options[:author] = {
+      :email => "jonmagic@gmail.com",
+      :name => "JonMagic",
+      :time => Time.now
+    }
+    options[:committer] = options[:author]
+    options[:message] =  "write #{filename}"
+    options[:parents] = repo.empty? ? [] : [ repo.head.target ].compact
+    options[:update_ref] = "HEAD"
+
+    commit = Rugged::Commit.create(repo, options)
+
+    index.write
+
+    oid
+  end
+
+  def make_change
+    @counter ||= @obj.keys.last.match(/key_(\d)/)[1].to_i
+    @obj["key_#{@counter+=1}"] = Lorem::Base.new("words", rand(1..10)).output
+
+    File.open(tmp.join(filename), "wb") do |file|
+      msg = MessagePack.pack(@obj)
+      file.write(msg)
+    end
+  end
+
+  def gc_and_print_kb(oids)
+    git("gc --quiet")
+    parent_oid, oid = Array(oids)
+    puts "parent oid: #{parent_oid}"
+    print parent_oid_bytes = object_size(parent_oid).to_i
+    puts " bytes"
+    @results_in_bytes[:parent_oid] << parent_oid_bytes
+    puts
+    return unless oid
+    puts "oid: #{oid}"
+    print oid_bytes = object_size(oid).to_i
+    puts " bytes"
+    @results_in_bytes[:oid] << oid_bytes
+    puts
+  end
+
+  def teardown
+    FileUtils.rm_r(tmp)
+  end
+end
+
+runner = Runner.new
+begin
+  if key_count = ARGV.shift
+    runner.bootstrap(key_count.to_i)
+  end
+  runner.setup
+  parent_oid = runner.make_commit
+  runner.gc_and_print_kb(parent_oid)
+  puts "Packfile is #{File.size(runner.packfile_path)} bytes"
+  puts "-" * 60
+
+  100_000.times do |n|
+    runner.make_change
+    oid = runner.make_commit
+    runner.gc_and_print_kb([parent_oid, oid])
+    parent_oid = oid
+    puts "Packfile is #{File.size(runner.packfile_path)} bytes"
+    puts "-" * 60
+  end
+ensure
+  runner.teardown
+end

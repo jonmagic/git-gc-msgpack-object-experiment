@@ -1,0 +1,25 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    coderay (1.1.0)
+    lorem (0.1.2)
+    method_source (0.8.2)
+    msgpack (0.7.4)
+    pry (0.10.3)
+      coderay (~> 1.1.0)
+      method_source (~> 0.8.1)
+      slop (~> 3.4)
+    rugged (0.23.2)
+    slop (3.6.0)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  lorem
+  msgpack
+  pry
+  rugged
+
+BUNDLED WITH
+   1.11.2
